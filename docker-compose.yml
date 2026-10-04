@@ -1,0 +1,25 @@
+# Development services. Phase 1 only needs PostgreSQL; the app itself runs natively for fast reloads.
+# Start:  docker compose up -d db
+# Stop:   docker compose down        (add -v to also delete the database volume)
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: roc-verifier-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-roc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-roc_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-roc_verifier}
+    ports:
+      # Bound to localhost only, so the database is not reachable from the network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
