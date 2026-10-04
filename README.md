@@ -14,7 +14,8 @@ The full design is in [docs/architecture-analysis.md](docs/architecture-analysis
 | Phase | What | State |
 |---|---|---|
 | 1 | Project setup: FastAPI skeleton, React shell, PostgreSQL, tooling, CI | Done |
-| 2 | Database models, migrations, app login | Next |
+| 2 | Database migrations, app login (cookie session + CSRF), append-only audit log | Done |
+| 3 | Batch PDF upload and case list | Next |
 
 ## What's in the stack (and why)
 
@@ -24,6 +25,8 @@ The full design is in [docs/architecture-analysis.md](docs/architecture-analysis
 | **Uvicorn** | The server process that runs the FastAPI app. |
 | **PostgreSQL** | The database. Stores cases, extracted claims, ROC results, reviews, audit logs, and (later) the job queue. |
 | **SQLAlchemy** | Lets Python code talk to PostgreSQL safely (parameterised queries, so no SQL injection). |
+| **Alembic** | Database migrations: versioned scripts that create and change tables, so every machine has the same schema. Think "Git for the database structure". |
+| **argon2** | Password hashing. Only a slow, salted hash of each app password is stored, never the password itself. |
 | **Docker Desktop** | Runs PostgreSQL in an isolated container, so you don't have to install it on Windows directly. |
 | **React + TypeScript** | The browser UI. TypeScript adds types to JavaScript so mistakes show up before runtime. |
 | **Vite** | Frontend dev server and bundler. Instant reloads while you edit; also forwards `/api` calls to the backend. |
@@ -39,9 +42,14 @@ backend/            FastAPI application
   app/
     main.py         app factory, security headers
     api/            routers (all routes under /api/v1)
+    cli.py          admin commands (create users)
     config/         settings loaded from .env
-    database/       SQLAlchemy engine and health check
+    database/       SQLAlchemy engine, session, base model
+    models/         database tables (users, sessions, audit log)
     schemas/        request/response models
+    security/       passwords, login sessions, CSRF, role checks
+    services/       business logic (audit logging so far)
+  migrations/       Alembic migration scripts
   tests/            pytest suite
   pyproject.toml    dependencies and tool config
 frontend/           React + TypeScript + Tailwind (Vite)
@@ -54,8 +62,8 @@ docker-compose.yml  PostgreSQL for local development
 .env.example        template for your local .env (never commit .env)
 ```
 
-More folders (`services/`, `workers/`, `models/`, `security/`, frontend `features/`) are added in the
-phases that need them.
+More folders (`workers/`, frontend `features/`) are added in the phases that need them. Each phase
+adds its own tables through a new Alembic migration.
 
 ## Prerequisites (Windows 11)
 
@@ -97,12 +105,19 @@ python -m venv .venv
 pip install -e ".[dev]"
 cd ..
 
-# 5. Frontend dependencies
+# 5. Create the database tables, then your first (admin) user.
+#    The password is typed at a hidden prompt: min 12 chars, upper + lower case, and a digit.
+cd backend
+alembic upgrade head
+python -m app.cli create-user --email you@example.com --name "Your Name" --role admin
+cd ..
+
+# 6. Frontend dependencies
 cd frontend
 npm install
 cd ..
 
-# 6. Git hooks (optional but recommended)
+# 7. Git hooks (optional but recommended)
 backend\.venv\Scripts\pre-commit.exe install
 ```
 
@@ -133,9 +148,13 @@ npm run dev
 
 Then open:
 
-- App: <http://localhost:5173>. The System status card should show API Online, Database Connected, ROC data provider "Mock data".
+- App: <http://localhost:5173>. Sign in with the user you created. The System status card should show API Online, Database Connected, ROC data provider "Mock data".
 - API docs: <http://localhost:8000/api/docs>
 - Health check: <http://localhost:8000/api/v1/health>
+
+After pulling new code, run `alembic upgrade head` (in `backend/`) to apply any new migrations.
+
+Roles: `admin` manages users and rules, `analyst` uploads and verifies documents, `reviewer` reviews flagged cases.
 
 If Database shows "Unavailable", check that Docker Desktop is running and run `docker compose ps`. The `db` service should show `healthy`.
 
@@ -145,7 +164,7 @@ If Database shows "Unavailable", check that Docker Desktop is running and run `d
 # Backend
 cd backend
 .\.venv\Scripts\Activate.ps1
-pytest              # tests (the database test is skipped if PostgreSQL isn't running)
+pytest              # tests (use a separate <db>_test database; skipped if PostgreSQL isn't running)
 ruff check .        # lint
 ruff format .       # auto-format
 
@@ -172,4 +191,7 @@ These apply from Phase 1 onwards:
 - `.env`, credentials, MCA session data, cookies, tokens, uploaded documents and generated reports are excluded by `.gitignore`. Never commit them.
 - MCA credentials are never stored, logged, or sent to an LLM. A human logs in to MCA directly and completes any CAPTCHA. The app never bypasses CAPTCHA or other MCA access controls.
 - PostgreSQL is bound to `127.0.0.1` only.
+- App login uses an httpOnly session cookie (JavaScript can't read it) plus a CSRF token kept in memory. Nothing sensitive goes in browser local storage.
+- Only hashes are stored for passwords (argon2) and session tokens (SHA-256). Accounts lock for 15 minutes after 5 failed logins.
+- The audit log is append-only: a database trigger rejects any edit or delete.
 - Development uses the mock ROC provider. No live MCA access is needed until Phase 15, which follows a review of MCA's terms of use.
